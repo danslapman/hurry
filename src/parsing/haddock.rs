@@ -53,37 +53,63 @@ pub fn extract_haddock(node: Node<'_>, source: &str) -> Option<String> {
 /// skipping `signature` nodes (which appear between the haddock and the
 /// function/data declaration in Haskell source).
 ///
+/// Collects **all** consecutive Haddock comment nodes so that multi-line docs
+/// written as separate `-- |` line comments are combined correctly.  This is
+/// important on Windows, where CRLF line endings cause tree-sitter to emit one
+/// comment node per line rather than a single multi-line node.
+///
 /// Returns `(found_doc, reached_start)` where `reached_start` is `true` when
 /// all preceding siblings were exhausted without encountering a non-signature,
 /// non-comment node — indicating this is the first declaration in its scope
 /// and the haddock might be at a higher level in the tree.
 fn preceding_haddock_inner(node: Node<'_>, source: &str) -> (Option<String>, bool) {
     let mut sib = node.prev_named_sibling();
-    while let Some(s) = sib {
-        let kind = s.kind();
-        // Signatures sit between the haddock and the declaration; skip them.
-        if kind == SIGNATURE {
-            sib = s.prev_named_sibling();
-            continue;
-        }
-        if COMMENT_KINDS.contains(&kind) {
-            let raw = &source[s.byte_range()];
-            let trimmed = raw.trim();
-            if trimmed.starts_with("-- |")
-                || trimmed.starts_with("{-|")
-                || trimmed.starts_with("{- |")
-            {
-                return (Some(strip_haddock_line(raw)), false);
+    let mut collected: Vec<String> = Vec::new();
+    let mut reached_start = false;
+
+    loop {
+        match sib {
+            None => {
+                reached_start = true;
+                break;
             }
-            // A non-forward comment (e.g. plain `--`) — stop here; the
-            // parent heuristic does not apply.
-            return (None, false);
+            Some(s) => {
+                let kind = s.kind();
+                // Signatures sit between the haddock and the declaration; skip them.
+                if kind == SIGNATURE {
+                    sib = s.prev_named_sibling();
+                    continue;
+                }
+                if COMMENT_KINDS.contains(&kind) {
+                    let raw = &source[s.byte_range()];
+                    let trimmed = raw.trim();
+                    if trimmed.starts_with("-- |")
+                        || trimmed.starts_with("{-|")
+                        || trimmed.starts_with("{- |")
+                    {
+                        let text = strip_haddock_line(raw);
+                        if !text.is_empty() {
+                            collected.push(text);
+                        }
+                        sib = s.prev_named_sibling();
+                        continue;
+                    }
+                    // A non-forward comment (e.g. plain `--`) — stop here; the
+                    // parent heuristic does not apply.
+                    break;
+                }
+                // Any other sibling type — stop.
+                break;
+            }
         }
-        // Any other sibling type — stop.
-        return (None, false);
     }
-    // No more prev siblings.
-    (None, true)
+
+    if !collected.is_empty() {
+        collected.reverse();
+        return (Some(collected.join("\n")), false);
+    }
+
+    (None, reached_start)
 }
 
 fn strip_haddock_line(raw: &str) -> String {
